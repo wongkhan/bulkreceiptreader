@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bulk Receipt Reader & Amount Extractor</title>
-  <!-- Tesseract.js OCR Library via CDN -->
+  <title>Bulk Receipt Reader with Highlight Preview</title>
+  <!-- Tesseract.js OCR Engine -->
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <style>
     :root {
@@ -20,7 +20,7 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background-color: var(--bg);
       color: var(--text);
-      max-width: 900px;
+      max-width: 1000px;
       margin: 40px auto;
       padding: 0 20px;
     }
@@ -105,11 +105,21 @@
       text-align: left;
       padding: 12px;
       border-bottom: 1px solid var(--border);
+      vertical-align: top;
     }
 
     th {
       background-color: #f1f5f9;
       font-weight: 600;
+    }
+
+    .preview-canvas {
+      max-width: 220px;
+      max-height: 280px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+      object-fit: contain;
     }
 
     .actions {
@@ -122,8 +132,8 @@
 <body>
 
   <div class="container">
-    <h1>Bulk Receipt OCR Reader</h1>
-    <p>Upload multiple receipt images to automatically extract the total amounts directly in your browser.</p>
+    <h1>Bulk Receipt Reader & Target Highlight</h1>
+    <p>Upload receipts to read rounded total amounts and highlight their exact position on the receipt.</p>
 
     <div class="upload-zone">
       <label for="receipt-input" class="btn">Select Receipt Images</label>
@@ -141,9 +151,9 @@
     <table id="results-table">
       <thead>
         <tr>
+          <th>Receipt Preview (Highlighted)</th>
           <th>File Name</th>
           <th>Extracted Amount</th>
-          <th>Status</th>
         </tr>
       </thead>
       <tbody id="results-body">
@@ -178,13 +188,12 @@
       processedData = [];
       progressContainer.style.display = 'block';
 
-      // Create OCR worker using Tesseract.js
+      // Initialize Tesseract worker
       const worker = await Tesseract.createWorker('eng');
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         
-        // Update Progress UI
         const percent = Math.round(((i) / files.length) * 100);
         progressFill.style.width = `${percent}%`;
         statusText.textContent = `Processing (${i + 1}/${files.length}): ${file.name}...`;
@@ -192,78 +201,156 @@
         try {
           const imageUrl = URL.createObjectURL(file);
           const ret = await worker.recognize(imageUrl);
+
+          // Extract total amount specifically around "TOTAL" keywords
+          const extraction = extractTotalWithBbox(ret.data);
+
+          // Draw image with bounding box on canvas
+          const canvas = document.createElement('canvas');
+          canvas.className = 'preview-canvas';
+          await renderImageWithHighlight(canvas, imageUrl, extraction.bbox);
+
           URL.revokeObjectURL(imageUrl);
 
-          // Extract total amount using pattern matching regex
-          const extractedAmount = extractTotalAmount(ret.data.text);
-
           processedData.push({
             fileName: file.name,
-            amount: extractedAmount,
-            status: 'Success'
+            amount: extraction.amount,
+            status: extraction.amount !== 'Not Found' ? 'Success' : 'Warning'
           });
 
-          appendTableRow(file.name, extractedAmount, 'Success');
+          appendTableRow(canvas, file.name, extraction.amount);
         } catch (error) {
-          processedData.push({
-            fileName: file.name,
-            amount: 'N/A',
-            status: 'Error'
-          });
-          appendTableRow(file.name, 'N/A', 'Error');
+          console.error(error);
+          processedData.push({ fileName: file.name, amount: 'Error', status: 'Error' });
+          const emptyCanvas = document.createElement('canvas');
+          appendTableRow(emptyCanvas, file.name, 'Error');
         }
       }
 
       await worker.terminate();
 
-      // Complete progress bar
       progressFill.style.width = '100%';
       statusText.textContent = 'Processing complete!';
       exportBtn.disabled = false;
     });
 
-    // Helper function: Scans OCR text for lines with total/amount keywords
-    function extractTotalAmount(text) {
-      const lines = text.split('\n');
-      let candidates = [];
+    /**
+     * Logic: Looks specifically for lines containing "TOTAL", "ROUNDED", "AMOUNT"
+     * and finds the exact word/number beside it along with its bounding box coordinates.
+     */
+    function extractTotalWithBbox(ocrData) {
+      const lines = ocrData.lines || [];
+      const currencyRegex = /(\d+[\.,]\d{2})\b/;
 
-      const currencyRegex = /[\$€£]?\s*(\d+[\.,]\d{2})\b/g;
+      let bestCandidate = null;
 
-      // 1. Look specifically for lines containing keywords like "TOTAL", "AMOUNT", or "BALANCE"
+      // Iterate through detected text lines
       for (const line of lines) {
-        if (/total|amount|due|balance|paid/i.test(line)) {
-          let match;
-          while ((match = currencyRegex.exec(line)) !== null) {
-            candidates.push(parseFloat(match[1].replace(',', '.')));
+        const textUpper = line.text.toUpperCase();
+
+        // Target line keywords: "TOTAL", "ROUNDED TOTAL", "AMOUNT DUE" (ignoring SUBTOTAL)
+        if ((textUpper.includes('TOTAL') || textUpper.includes('ROUNDED') || textUpper.includes('AMOUNT')) && !textUpper.includes('SUBTOTAL')) {
+          
+          for (const word of line.words) {
+            const cleanWordText = word.text.replace(/[^0-9\.,]/g, '');
+            const match = cleanWordText.match(currencyRegex);
+
+            if (match) {
+              const numVal = parseFloat(match[1].replace(',', '.'));
+              if (!isNaN(numVal)) {
+                // Return immediately if found beside TOTAL keyword
+                return {
+                  amount: '$' + numVal.toFixed(2),
+                  bbox: word.bbox // Bounding box {x0, y0, x1, y1}
+                };
+              }
+            }
           }
         }
       }
 
-      // 2. If matching line found, take the highest dollar value on those lines
-      if (candidates.length > 0) {
-        return '$' + Math.max(...candidates).toFixed(2);
+      // Fallback: Find largest number on page if "TOTAL" keyword line wasn't detected
+      let maxVal = 0;
+      let fallbackBbox = null;
+
+      for (const line of lines) {
+        for (const word of line.words) {
+          const cleanWordText = word.text.replace(/[^0-9\.,]/g, '');
+          const match = cleanWordText.match(currencyRegex);
+          if (match) {
+            const numVal = parseFloat(match[1].replace(',', '.'));
+            if (!isNaN(numVal) && numVal > maxVal) {
+              maxVal = numVal;
+              fallbackBbox = word.bbox;
+            }
+          }
+        }
       }
 
-      // 3. Fallback: Search all numbers in the entire document and pick the maximum
-      let match;
-      while ((match = currencyRegex.exec(text)) !== null) {
-        candidates.push(parseFloat(match[1].replace(',', '.')));
+      if (maxVal > 0) {
+        return {
+          amount: '$' + maxVal.toFixed(2),
+          bbox: fallbackBbox
+        };
       }
 
-      if (candidates.length > 0) {
-        return '$' + Math.max(...candidates).toFixed(2);
-      }
-
-      return 'Not Found';
+      return { amount: 'Not Found', bbox: null };
     }
 
-    function appendTableRow(fileName, amount, status) {
+    /**
+     * Draws the image on a canvas and overlays a glowing highlight box over the detected amount.
+     */
+    function renderImageWithHighlight(canvas, imageUrl, bbox) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+
+          // Draw base image
+          ctx.drawImage(img, 0, 0);
+
+          // Draw highlight rectangle over amount if detected
+          if (bbox) {
+            const padding = 12;
+            const x = bbox.x0 - padding;
+            const y = bbox.y0 - padding;
+            const width = (bbox.x1 - bbox.x0) + (padding * 2);
+            const height = (bbox.y1 - bbox.y0) + (padding * 2);
+
+            // Translucent yellow fill
+            ctx.fillStyle = 'rgba(253, 224, 71, 0.45)';
+            ctx.fillRect(x, y, width, height);
+
+            // Red border outline
+            ctx.strokeStyle = '#ef4444';
+            ctx.lineWidth = Math.max(6, img.width / 120);
+            ctx.strokeRect(x, y, width, height);
+          }
+
+          resolve();
+        };
+        img.src = imageUrl;
+      });
+    }
+
+    function appendTableRow(canvasElement, fileName, amount) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${fileName}</td>
-        <td><strong>${amount}</strong></td>
-        <td><span style="color: ${status === 'Success' ? '#16a34a' : '#dc2626'}">${status}</span></td>
-      `;
+
+      const tdPreview = document.createElement('td');
+      tdPreview.appendChild(canvasElement);
+
+      const tdName = document.createElement('td');
+      tdName.textContent = fileName;
+
+      const tdAmount = document.createElement('td');
+      tdAmount.innerHTML = `<strong>${amount}</strong>`;
+
+      tr.appendChild(tdPreview);
+      tr.appendChild(tdName);
+      tr.appendChild(tdAmount);
+
       resultsBody.appendChild(tr);
     }
 
