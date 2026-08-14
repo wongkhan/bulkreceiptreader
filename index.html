@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bulk Receipt Reader with Highlight Preview</title>
+  <title>Bulk Receipt Reader - Rounded Total Extractor</title>
   <!-- Tesseract.js OCR Engine -->
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <style>
@@ -114,8 +114,8 @@
     }
 
     .preview-canvas {
-      max-width: 220px;
-      max-height: 280px;
+      max-width: 260px;
+      max-height: 350px;
       border: 1px solid var(--border);
       border-radius: 6px;
       box-shadow: 0 2px 4px rgba(0,0,0,0.05);
@@ -132,8 +132,8 @@
 <body>
 
   <div class="container">
-    <h1>Bulk Receipt Reader & Target Highlight</h1>
-    <p>Upload receipts to read rounded total amounts and highlight their exact position on the receipt.</p>
+    <h1>Bulk Receipt Reader (Rounded Total Targeted)</h1>
+    <p>Upload receipts to read <strong>Rounded Total (RM)</strong> and highlight its exact location.</p>
 
     <div class="upload-zone">
       <label for="receipt-input" class="btn">Select Receipt Images</label>
@@ -151,7 +151,7 @@
     <table id="results-table">
       <thead>
         <tr>
-          <th>Receipt Preview (Highlighted)</th>
+          <th>Receipt Preview (Highlight)</th>
           <th>File Name</th>
           <th>Extracted Amount</th>
         </tr>
@@ -188,7 +188,6 @@
       processedData = [];
       progressContainer.style.display = 'block';
 
-      // Initialize Tesseract worker
       const worker = await Tesseract.createWorker('eng');
 
       for (let i = 0; i < files.length; i++) {
@@ -202,10 +201,10 @@
           const imageUrl = URL.createObjectURL(file);
           const ret = await worker.recognize(imageUrl);
 
-          // Extract total amount specifically around "TOTAL" keywords
-          const extraction = extractTotalWithBbox(ret.data);
+          // Extract specifically around "ROUNDED TOTAL" keyword
+          const extraction = extractRoundedTotal(ret.data);
 
-          // Draw image with bounding box on canvas
+          // Draw highlight canvas preview
           const canvas = document.createElement('canvas');
           canvas.className = 'preview-canvas';
           await renderImageWithHighlight(canvas, imageUrl, extraction.bbox);
@@ -235,33 +234,27 @@
     });
 
     /**
-     * Logic: Looks specifically for lines containing "TOTAL", "ROUNDED", "AMOUNT"
-     * and finds the exact word/number beside it along with its bounding box coordinates.
+     * Specialized Extraction Logic for "Rounded Total (RM)"
      */
-    function extractTotalWithBbox(ocrData) {
+    function extractRoundedTotal(ocrData) {
       const lines = ocrData.lines || [];
-      const currencyRegex = /(\d+[\.,]\d{2})\b/;
+      const amountRegex = /(\d{1,3}(?:[,\s]\d{3})*[\.,]\d{2})\b/;
 
-      let bestCandidate = null;
-
-      // Iterate through detected text lines
+      // PRIORITY 1: Search specifically for "ROUNDED" or "ROUNDED TOTAL"
       for (const line of lines) {
         const textUpper = line.text.toUpperCase();
 
-        // Target line keywords: "TOTAL", "ROUNDED TOTAL", "AMOUNT DUE" (ignoring SUBTOTAL)
-        if ((textUpper.includes('TOTAL') || textUpper.includes('ROUNDED') || textUpper.includes('AMOUNT')) && !textUpper.includes('SUBTOTAL')) {
-          
+        if (textUpper.includes('ROUNDED')) {
           for (const word of line.words) {
             const cleanWordText = word.text.replace(/[^0-9\.,]/g, '');
-            const match = cleanWordText.match(currencyRegex);
+            const match = cleanWordText.match(amountRegex);
 
             if (match) {
               const numVal = parseFloat(match[1].replace(',', '.'));
-              if (!isNaN(numVal)) {
-                // Return immediately if found beside TOTAL keyword
+              if (!isNaN(numVal) && numVal > 0) {
                 return {
-                  amount: '$' + numVal.toFixed(2),
-                  bbox: word.bbox // Bounding box {x0, y0, x1, y1}
+                  amount: 'RM ' + numVal.toFixed(2),
+                  bbox: line.bbox // Highlights the entire "Rounded Total (RM): 487.00" line
                 };
               }
             }
@@ -269,14 +262,35 @@
         }
       }
 
-      // Fallback: Find largest number on page if "TOTAL" keyword line wasn't detected
+      // PRIORITY 2: Fallback to "TOTAL" line (ignoring Sub Total and Discount lines)
+      for (const line of lines) {
+        const textUpper = line.text.toUpperCase();
+        if (textUpper.includes('TOTAL') && !textUpper.includes('SUB') && !textUpper.includes('DISCOUNT')) {
+          for (const word of line.words) {
+            const cleanWordText = word.text.replace(/[^0-9\.,]/g, '');
+            const match = cleanWordText.match(amountRegex);
+
+            if (match) {
+              const numVal = parseFloat(match[1].replace(',', '.'));
+              if (!isNaN(numVal) && numVal > 0) {
+                return {
+                  amount: 'RM ' + numVal.toFixed(2),
+                  bbox: line.bbox
+                };
+              }
+            }
+          }
+        }
+      }
+
+      // PRIORITY 3: Fallback to largest number found on receipt
       let maxVal = 0;
       let fallbackBbox = null;
 
       for (const line of lines) {
         for (const word of line.words) {
           const cleanWordText = word.text.replace(/[^0-9\.,]/g, '');
-          const match = cleanWordText.match(currencyRegex);
+          const match = cleanWordText.match(amountRegex);
           if (match) {
             const numVal = parseFloat(match[1].replace(',', '.'));
             if (!isNaN(numVal) && numVal > maxVal) {
@@ -289,7 +303,7 @@
 
       if (maxVal > 0) {
         return {
-          amount: '$' + maxVal.toFixed(2),
+          amount: 'RM ' + maxVal.toFixed(2),
           bbox: fallbackBbox
         };
       }
@@ -298,7 +312,7 @@
     }
 
     /**
-     * Draws the image on a canvas and overlays a glowing highlight box over the detected amount.
+     * Draws the image on canvas and adds a yellow highlight box around "Rounded Total"
      */
     function renderImageWithHighlight(canvas, imageUrl, bbox) {
       return new Promise((resolve) => {
@@ -308,24 +322,24 @@
           canvas.height = img.height;
           const ctx = canvas.getContext('2d');
 
-          // Draw base image
+          // Draw base receipt image
           ctx.drawImage(img, 0, 0);
 
-          // Draw highlight rectangle over amount if detected
+          // Draw highlight rectangle over Rounded Total line
           if (bbox) {
-            const padding = 12;
+            const padding = 15;
             const x = bbox.x0 - padding;
             const y = bbox.y0 - padding;
             const width = (bbox.x1 - bbox.x0) + (padding * 2);
             const height = (bbox.y1 - bbox.y0) + (padding * 2);
 
-            // Translucent yellow fill
-            ctx.fillStyle = 'rgba(253, 224, 71, 0.45)';
+            // Translucent yellow highlight box
+            ctx.fillStyle = 'rgba(253, 224, 71, 0.5)';
             ctx.fillRect(x, y, width, height);
 
             // Red border outline
             ctx.strokeStyle = '#ef4444';
-            ctx.lineWidth = Math.max(6, img.width / 120);
+            ctx.lineWidth = Math.max(8, img.width / 100);
             ctx.strokeRect(x, y, width, height);
           }
 
@@ -345,7 +359,7 @@
       tdName.textContent = fileName;
 
       const tdAmount = document.createElement('td');
-      tdAmount.innerHTML = `<strong>${amount}</strong>`;
+      tdAmount.innerHTML = `<strong style="font-size: 1.1rem; color: #0f172a;">${amount}</strong>`;
 
       tr.appendChild(tdPreview);
       tr.appendChild(tdName);
