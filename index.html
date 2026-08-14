@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bulk Receipt Reader - Thermal OCR Optimized</title>
+  <title>Bulk Receipt Reader - Automated Amount Extractor</title>
   <!-- Tesseract.js OCR Engine -->
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <style>
@@ -132,8 +132,8 @@
 <body>
 
   <div class="container">
-    <h1>Bulk Receipt Reader (Optimized Thermal Extractor)</h1>
-    <p>Enhanced with image contrast boosting and fuzzy keyword matching for thermal receipts.</p>
+    <h1>Bulk Receipt Reader</h1>
+    <p>Upload receipts to read and highlight the <strong>Rounded Total / Total Amount</strong> automatically.</p>
 
     <div class="upload-zone">
       <label for="receipt-input" class="btn">Select Receipt Images</label>
@@ -199,16 +199,14 @@
 
         try {
           const rawImageUrl = URL.createObjectURL(file);
-          
-          // Preprocess image to boost contrast for faint thermal receipt text
           const processedDataUrl = await preprocessImage(rawImageUrl);
 
           const ret = await worker.recognize(processedDataUrl);
 
-          // Extract total with fuzzy pattern matching
-          const extraction = extractRoundedTotalFuzzy(ret.data);
+          // Extract amount beside "Rounded Total" or "Total"
+          const extraction = extractUniversalTotal(ret.data);
 
-          // Render canvas preview with highlight
+          // Draw highlight canvas preview
           const canvas = document.createElement('canvas');
           canvas.className = 'preview-canvas';
           await renderImageWithHighlight(canvas, rawImageUrl, extraction.bbox);
@@ -238,7 +236,7 @@
     });
 
     /**
-     * Converts image to high-contrast black and white to help OCR read faint thermal print.
+     * Boosts contrast to help read faint receipt paper
      */
     function preprocessImage(src) {
       return new Promise((resolve) => {
@@ -253,14 +251,13 @@
           const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
           const data = imageData.data;
 
-          // Increase contrast and binarize
           for (let i = 0; i < data.length; i += 4) {
             const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-            const threshold = 140; // Threshold for thermal paper faint background
+            const threshold = 145;
             const v = avg < threshold ? 0 : 255;
-            data[i] = v;     // R
-            data[i + 1] = v; // G
-            data[i + 2] = v; // B
+            data[i] = v;
+            data[i + 1] = v;
+            data[i + 2] = v;
           }
 
           ctx.putImageData(imageData, 0, 0);
@@ -271,75 +268,100 @@
     }
 
     /**
-     * Fuzzy Extraction Logic:
-     * Handles misspellings ("Rourided", "Rnd", "RMT") and checks spatial positioning.
+     * Universal extraction logic for generic receipts
      */
-    function extractRoundedTotalFuzzy(ocrData) {
-      const lines = ocrData.lines || [];
+    function extractUniversalTotal(ocrData) {
+      const words = ocrData.words || [];
       const amountRegex = /(\d{1,3}(?:[,\s]\d{3})*[\.,]\d{2})\b/;
 
-      // Fuzzy keywords that catch misread OCR variations of "Rounded Total"
-      const roundedKeywords = ['ROUND', 'ROUN', 'RND', 'RNDD', 'ROUR', 'ROUNED', 'RM)'];
+      // Priority 1: Search specifically for "ROUNDED" target keyword
+      let targetLabelWord = null;
+      for (const word of words) {
+        const txt = word.text.toUpperCase();
+        if (txt.includes('ROUNDED') || txt.includes('ROUND')) {
+          targetLabelWord = word;
+          break;
+        }
+      }
 
-      // STEP 1: Search specifically for Rounded Total variations
-      for (const line of lines) {
-        const textUpper = line.text.toUpperCase();
-        
-        const isRoundedLine = roundedKeywords.some(kw => textUpper.includes(kw));
-
-        if (isRoundedLine) {
-          // Look for number on the same line
-          for (const word of line.words) {
-            const cleanWordText = word.text.replace(/[^0-9\.,]/g, '');
-            const match = cleanWordText.match(amountRegex);
-
-            if (match) {
-              const numVal = parseFloat(match[1].replace(',', '.'));
-              if (!isNaN(numVal) && numVal > 0) {
-                return { amount: 'RM ' + numVal.toFixed(2), bbox: line.bbox };
-              }
-            }
+      // Priority 2: Fall back to "TOTAL" or "AMOUNT DUE" if "Rounded" isn't present
+      if (!targetLabelWord) {
+        for (const word of words) {
+          const txt = word.text.toUpperCase();
+          if ((txt.includes('TOTAL') || txt.includes('DUE')) && !txt.includes('SUB') && !txt.includes('DISCOUNT')) {
+            targetLabelWord = word;
+            break;
           }
         }
       }
 
-      // STEP 2: Spatial Match - Scan lines in the bottom 40% of the image
-      // (Receipt totals are almost always at the bottom!)
-      const pageHeight = ocrData.image_height || 1000;
-      const bottomThreshold = pageHeight * 0.60; // Lines below 60% Y position
+      // Extract number horizontally aligned to the right of target label
+      if (targetLabelWord) {
+        const labelY = (targetLabelWord.bbox.y0 + targetLabelWord.bbox.y1) / 2;
+        let bestNumberWord = null;
+        let minDistanceX = Infinity;
 
-      let bottomCandidates = [];
+        for (const word of words) {
+          if (word.bbox.x0 >= targetLabelWord.bbox.x0) {
+            const wordY = (word.bbox.y0 + word.bbox.y1) / 2;
+            
+            // Vertical tolerance alignment check (+/- 40px)
+            if (Math.abs(wordY - labelY) <= 40) {
+              const cleanText = word.text.replace(/[^0-9\.,]/g, '');
+              const match = cleanText.match(amountRegex);
 
-      for (const line of lines) {
-        if (line.bbox && line.bbox.y0 >= bottomThreshold) {
-          const textUpper = line.text.toUpperCase();
-
-          // Skip subtotal, discounts, and payment method lines if possible
-          if (!textUpper.includes('SUB') && !textUpper.includes('DISCOUNT') && !textUpper.includes('TNG')) {
-            for (const word of line.words) {
-              const cleanWordText = word.text.replace(/[^0-9\.,]/g, '');
-              const match = cleanWordText.match(amountRegex);
               if (match) {
-                const numVal = parseFloat(match[1].replace(',', '.'));
-                if (!isNaN(numVal) && numVal > 0) {
-                  bottomCandidates.push({ amount: numVal, bbox: line.bbox });
+                const distanceX = word.bbox.x0 - targetLabelWord.bbox.x1;
+                if (distanceX < minDistanceX) {
+                  minDistanceX = distanceX;
+                  const numVal = parseFloat(match[1].replace(',', '.'));
+                  if (!isNaN(numVal) && numVal > 0) {
+                    bestNumberWord = {
+                      amount: numVal.toFixed(2),
+                      bbox: word.bbox
+                    };
+                  }
                 }
               }
             }
           }
         }
+
+        if (bestNumberWord) {
+          return {
+            amount: bestNumberWord.amount,
+            bbox: bestNumberWord.bbox
+          };
+        }
       }
 
-      if (bottomCandidates.length > 0) {
-        // Return the first valid amount in the bottom section
-        const target = bottomCandidates[0];
-        return { amount: 'RM ' + target.amount.toFixed(2), bbox: target.bbox };
+      // Priority 3: Fallback - Search bottom 35% of receipt for the last valid number
+      const pageHeight = ocrData.image_height || 1000;
+      const bottomThreshold = pageHeight * 0.65;
+      let lastAmount = null;
+
+      for (const word of words) {
+        if (word.bbox.y0 >= bottomThreshold) {
+          const cleanText = word.text.replace(/[^0-9\.,]/g, '');
+          const match = cleanText.match(amountRegex);
+          if (match) {
+            const numVal = parseFloat(match[1].replace(',', '.'));
+            if (!isNaN(numVal) && numVal > 0) {
+              lastAmount = { amount: numVal.toFixed(2), bbox: word.bbox };
+            }
+          }
+        }
       }
+
+      if (lastAmount) return lastAmount;
 
       return { amount: 'Not Found', bbox: null };
     }
 
-    function renderImageWithHighlight(canvas, imageUrl, bbox) {
+    /**
+     * Highlights extracted number with a yellow fill and red border
+     */
+    function renderImageWithHighlight(canvas, imageUrl, numberBbox) {
       return new Promise((resolve) => {
         const img = new Image();
         img.onload = () => {
@@ -349,18 +371,18 @@
 
           ctx.drawImage(img, 0, 0);
 
-          if (bbox) {
-            const padding = 15;
-            const x = bbox.x0 - padding;
-            const y = bbox.y0 - padding;
-            const width = (bbox.x1 - bbox.x0) + (padding * 2);
-            const height = (bbox.y1 - bbox.y0) + (padding * 2);
+          if (numberBbox) {
+            const padding = 12;
+            const x = numberBbox.x0 - padding;
+            const y = numberBbox.y0 - padding;
+            const width = (numberBbox.x1 - numberBbox.x0) + (padding * 2);
+            const height = (numberBbox.y1 - numberBbox.y0) + (padding * 2);
 
-            ctx.fillStyle = 'rgba(253, 224, 71, 0.55)';
+            ctx.fillStyle = 'rgba(253, 224, 71, 0.6)';
             ctx.fillRect(x, y, width, height);
 
             ctx.strokeStyle = '#ef4444';
-            ctx.lineWidth = Math.max(8, img.width / 90);
+            ctx.lineWidth = Math.max(6, img.width / 100);
             ctx.strokeRect(x, y, width, height);
           }
 
@@ -380,7 +402,7 @@
       tdName.textContent = fileName;
 
       const tdAmount = document.createElement('td');
-      tdAmount.innerHTML = `<strong style="font-size: 1.1rem; color: #0f172a;">${amount}</strong>`;
+      tdAmount.innerHTML = `<strong style="font-size: 1.2rem; color: #1e293b;">${amount !== 'Not Found' ? amount : 'Not Found'}</strong>`;
 
       tr.appendChild(tdPreview);
       tr.appendChild(tdName);
