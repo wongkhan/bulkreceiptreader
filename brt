@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bulk Receipt Reader & Amount Extractor</title>
-  <!-- Tesseract.js CDN -->
+  <!-- Tesseract.js OCR Library via CDN -->
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <style>
     :root {
@@ -123,7 +123,7 @@
 
   <div class="container">
     <h1>Bulk Receipt OCR Reader</h1>
-    <p>Upload multiple receipt images to process them entirely inside your browser.</p>
+    <p>Upload multiple receipt images to automatically extract the total amounts directly in your browser.</p>
 
     <div class="upload-zone">
       <label for="receipt-input" class="btn">Select Receipt Images</label>
@@ -178,7 +178,7 @@
       processedData = [];
       progressContainer.style.display = 'block';
 
-      // Create OCR worker
+      // Create OCR worker using Tesseract.js
       const worker = await Tesseract.createWorker('eng');
 
       for (let i = 0; i < files.length; i++) {
@@ -194,7 +194,7 @@
           const ret = await worker.recognize(imageUrl);
           URL.revokeObjectURL(imageUrl);
 
-          // Extract total amount using pattern regex
+          // Extract total amount using pattern matching regex
           const extractedAmount = extractTotalAmount(ret.data.text);
 
           processedData.push({
@@ -216,14 +216,13 @@
 
       await worker.terminate();
 
-      // Finish Progress
+      // Complete progress bar
       progressFill.style.width = '100%';
       statusText.textContent = 'Processing complete!';
       exportBtn.disabled = false;
     });
 
-    // Helper logic: Scans lines for keywords like "TOTAL", "AMOUNT", "DUE"
-    // and returns the highest/matching dollar value on those lines.
+    // Helper function: Scans OCR text for lines with total/amount keywords
     function extractTotalAmount(text) {
       const lines = text.split('\n');
       let candidates = [];
@@ -240,12 +239,12 @@
         }
       }
 
-      // 2. If a target line keyword was found, pick the largest number from those lines
+      // 2. If matching line found, take the highest dollar value on those lines
       if (candidates.length > 0) {
         return '$' + Math.max(...candidates).toFixed(2);
       }
 
-      // 3. Fallback: Search the entire text for all amounts and grab the largest number
+      // 3. Fallback: Search all numbers in the entire document and pick the maximum
       let match;
       while ((match = currencyRegex.exec(text)) !== null) {
         candidates.push(parseFloat(match[1].replace(',', '.')));
