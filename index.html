@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bulk Receipt Reader & Amount Extractor</title>
+  <!-- Tesseract.js OCR Library via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <style>
+    :root {
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #1e293b;
+      --border: #e2e8f0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }
+
+    .container {
+      background: var(--card);
+      padding: 30px;
+      border-radius: 12px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 1.5rem;
+    }
+
+    .upload-zone {
+      border: 2px dashed var(--border);
+      padding: 30px;
+      text-align: center;
+      border-radius: 8px;
+      margin: 20px 0;
+      background: #fafafa;
+    }
+
+    input[type="file"] {
+      display: none;
+    }
+
+    .btn {
+      background-color: var(--primary);
+      color: white;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      font-size: 0.95rem;
+    }
+
+    .btn:hover {
+      background-color: var(--primary-hover);
+    }
+
+    .btn:disabled {
+      background-color: #94a3b8;
+      cursor: not-allowed;
+    }
+
+    .progress-container {
+      margin: 20px 0;
+      display: none;
+    }
+
+    .progress-bar {
+      height: 10px;
+      background-color: #e2e8f0;
+      border-radius: 5px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background-color: var(--primary);
+      transition: width 0.3s ease;
+    }
+
+    .status-text {
+      font-size: 0.85rem;
+      color: #64748b;
+      margin-top: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      background-color: #f1f5f9;
+      font-weight: 600;
+    }
+
+    .actions {
+      margin-top: 20px;
+      display: flex;
+      justify-content: flex-end;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h1>Bulk Receipt OCR Reader</h1>
+    <p>Upload multiple receipt images to automatically extract the total amounts directly in your browser.</p>
+
+    <div class="upload-zone">
+      <label for="receipt-input" class="btn">Select Receipt Images</label>
+      <input type="file" id="receipt-input" multiple accept="image/*">
+      <p id="file-count" class="status-text">No files selected</p>
+    </div>
+
+    <div class="progress-container" id="progress-container">
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <div class="status-text" id="status-text">Initializing OCR worker...</div>
+    </div>
+
+    <table id="results-table">
+      <thead>
+        <tr>
+          <th>File Name</th>
+          <th>Extracted Amount</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="results-body">
+        <tr>
+          <td colspan="3" style="text-align: center; color: #94a3b8;">No receipts processed yet.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="actions">
+      <button class="btn" id="export-btn" disabled onclick="exportToCSV()">Export to CSV</button>
+    </div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('receipt-input');
+    const fileCount = document.getElementById('file-count');
+    const progressContainer = document.getElementById('progress-container');
+    const progressFill = document.getElementById('progress-fill');
+    const statusText = document.getElementById('status-text');
+    const resultsBody = document.getElementById('results-body');
+    const exportBtn = document.getElementById('export-btn');
+
+    let processedData = [];
+
+    fileInput.addEventListener('change', async (e) => {
+      const files = e.target.files;
+      if (!files.length) return;
+
+      fileCount.textContent = `${files.length} file(s) selected`;
+      resultsBody.innerHTML = '';
+      processedData = [];
+      progressContainer.style.display = 'block';
+
+      // Create OCR worker using Tesseract.js
+      const worker = await Tesseract.createWorker('eng');
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        
+        // Update Progress UI
+        const percent = Math.round(((i) / files.length) * 100);
+        progressFill.style.width = `${percent}%`;
+        statusText.textContent = `Processing (${i + 1}/${files.length}): ${file.name}...`;
+
+        try {
+          const imageUrl = URL.createObjectURL(file);
+          const ret = await worker.recognize(imageUrl);
+          URL.revokeObjectURL(imageUrl);
+
+          // Extract total amount using pattern matching regex
+          const extractedAmount = extractTotalAmount(ret.data.text);
+
+          processedData.push({
+            fileName: file.name,
+            amount: extractedAmount,
+            status: 'Success'
+          });
+
+          appendTableRow(file.name, extractedAmount, 'Success');
+        } catch (error) {
+          processedData.push({
+            fileName: file.name,
+            amount: 'N/A',
+            status: 'Error'
+          });
+          appendTableRow(file.name, 'N/A', 'Error');
+        }
+      }
+
+      await worker.terminate();
+
+      // Complete progress bar
+      progressFill.style.width = '100%';
+      statusText.textContent = 'Processing complete!';
+      exportBtn.disabled = false;
+    });
+
+    // Helper function: Scans OCR text for lines with total/amount keywords
+    function extractTotalAmount(text) {
+      const lines = text.split('\n');
+      let candidates = [];
+
+      const currencyRegex = /[\$€£]?\s*(\d+[\.,]\d{2})\b/g;
+
+      // 1. Look specifically for lines containing keywords like "TOTAL", "AMOUNT", or "BALANCE"
+      for (const line of lines) {
+        if (/total|amount|due|balance|paid/i.test(line)) {
+          let match;
+          while ((match = currencyRegex.exec(line)) !== null) {
+            candidates.push(parseFloat(match[1].replace(',', '.')));
+          }
+        }
+      }
+
+      // 2. If matching line found, take the highest dollar value on those lines
+      if (candidates.length > 0) {
+        return '$' + Math.max(...candidates).toFixed(2);
+      }
+
+      // 3. Fallback: Search all numbers in the entire document and pick the maximum
+      let match;
+      while ((match = currencyRegex.exec(text)) !== null) {
+        candidates.push(parseFloat(match[1].replace(',', '.')));
+      }
+
+      if (candidates.length > 0) {
+        return '$' + Math.max(...candidates).toFixed(2);
+      }
+
+      return 'Not Found';
+    }
+
+    function appendTableRow(fileName, amount, status) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${fileName}</td>
+        <td><strong>${amount}</strong></td>
+        <td><span style="color: ${status === 'Success' ? '#16a34a' : '#dc2626'}">${status}</span></td>
+      `;
+      resultsBody.appendChild(tr);
+    }
+
+    function exportToCSV() {
+      if (!processedData.length) return;
+
+      let csvContent = "data:text/csv;charset=utf-8,File Name,Extracted Amount,Status\n";
+      processedData.forEach(row => {
+        csvContent += `"${row.fileName}","${row.amount}","${row.status}"\n`;
+      });
+
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", "receipt_summary.csv");
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  </script>
+
+</body>
+</html>
